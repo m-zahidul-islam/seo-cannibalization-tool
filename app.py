@@ -56,7 +56,7 @@ def scrape_seo_data(url):
         return "Error", 0, "Unknown"
 
 # --- 3. Streamlit UI Layout ---
-st.set_page_config(page_title="Zahidul's Smart SEO Auditor", layout="wide")
+st.set_page_config(page_title="M Zahidul Islam's Smart SEO Auditor", layout="wide")
 st.title("🛡️ Professional SEO Audit Tool")
 st.write("Enter your sitemap below. The tool will automatically skip media and hidden sitemaps.")
 
