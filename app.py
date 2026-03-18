@@ -6,7 +6,7 @@ from thefuzz import fuzz
 import io
 import time
 
-# --- ১. স্মার্ট সাইটম্যাপ ক্রলার ---
+# --- ১. সাইটম্যাপ ক্রলার ---
 def get_sitemap_urls(url):
     urls = []
     exclude_keywords = ['image', 'attachment', 'video', 'media', 'gallery', 'css', 'js']
@@ -25,7 +25,7 @@ def get_sitemap_urls(url):
     except: pass
     return list(set(urls))
 
-# --- ২. পেজ ডাটা স্ক্র্যাপার ---
+# --- ২. ডাটা স্ক্র্যাপার ---
 def scrape_seo_data(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -46,23 +46,23 @@ def scrape_seo_data(url):
 
 # --- ৩. ইউজার ইন্টারফেস ---
 st.set_page_config(page_title="Zahidul's Pro SEO Auditor", layout="wide")
-st.title("🛡️ Advanced SEO Cannibalization & Action Plan Generator")
-st.write("আপনার সাইটম্যাপ লিঙ্কটি দিন এবং প্রফেশনাল এক্সেল অডিট রিপোর্ট তৈরি করুন।")
+st.title("🛡️ Advanced SEO Auditor (500 Limit & Excel)")
 
-sitemap_input = st.text_input("Sitemap URL:", placeholder="https://sareemela.com/sitemap_index.xml")
+sitemap_input = st.text_input("Sitemap URL দিন:", placeholder="https://example.com/sitemap_index.xml")
 
-if st.button("Generate Excel Report"):
+if st.button("Generate Professional Audit"):
     if sitemap_input:
-        with st.spinner("লিঙ্ক সংগ্রহ এবং এনালাইসিস চলছে..."):
+        with st.spinner("লিঙ্ক এনালাইসিস চলছে... দয়া করে অপেক্ষা করুন।"):
             all_links = get_sitemap_urls(sitemap_input)
             
             if not all_links:
                 st.error("কোনো ভ্যালিড লিঙ্ক পাওয়া যায়নি।")
             else:
-                st.info(f"মোট {len(all_links)} টি পেজ পাওয়া গেছে। প্রথম ১০০টি প্রসেস করা হচ্ছে...")
+                # আপনার অনুরোধ অনুযায়ী ৫০০টি লিঙ্কের লিমিট সেট করা হলো
+                process_limit = all_links[:500] 
+                st.info(f"মোট {len(all_links)} টি লিঙ্ক পাওয়া গেছে। প্রথম ৫০০টি প্রসেস করা হচ্ছে...")
                 
                 results = []
-                process_limit = all_links[:100] 
                 progress_bar = st.progress(0)
                 
                 for i, url in enumerate(process_limit):
@@ -115,10 +115,7 @@ if st.button("Generate Excel Report"):
 
                 # ৫. ডেটাফ্রেম তৈরি
                 complete_audit_df = pd.DataFrame(final_audit_data)
-                
-                # শুধুমাত্র সমস্যাগুলো নিয়ে 'Priority Action Plan' তৈরি
                 action_plan_df = complete_audit_df[complete_audit_df['Severity'] != "🟢 OK"].copy()
-                # অপ্রয়োজনীয় কলাম বাদ দিয়ে সাজানো
                 action_plan_df = action_plan_df[['Priority', 'Recommended Fix', 'URL', 'Conflicting URL', 'Issue / Problem']]
 
                 # ৬. এক্সেল ফাইল জেনারেশন (Memory Buffer)
@@ -129,20 +126,16 @@ if st.button("Generate Excel Report"):
                 
                 processed_data = output.getvalue()
 
-                # ৭. রেজাল্ট ডিসপ্লে এবং ডাউনলোড
-                st.success("এনালাইসিস সম্পন্ন হয়েছে!")
-                
-                st.subheader("📌 Priority Action Plan")
+                # ৭. রেজাল্ট এবং ডাউনলোড বাটন
+                st.success("অডিট সম্পন্ন হয়েছে!")
+                st.subheader("🔥 Priority Action Plan")
                 st.dataframe(action_plan_df, use_container_width=True)
 
                 st.download_button(
-                    label="📥 ডাউনলোড প্রফেশনাল এক্সেল অডিট (.xlsx)",
+                    label="📥 ডাউনলোড প্রফেশনাল এক্সেল (.xlsx)",
                     data=processed_data,
-                    file_name="SEO_Audit_Report_Zahidul.xlsx",
+                    file_name="SEO_Audit_Report.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
     else:
-        st.warning("দয়া করে একটি সাইটম্যাপ ইউআরএল দিন।")
-
-st.markdown("---")
-st.caption("Custom Tool for M Zahidul Islam | SEO & Search Visibility Specialist")
+        st.warning("সাইটম্যাপ ইউআরএল দিন।")
