@@ -5,44 +5,28 @@ from bs4 import BeautifulSoup
 from thefuzz import fuzz
 import io
 import re
-from openpyxl.styles import PatternFill, Font, Alignment
 
-# --- 1. Smart Sitemap Fetcher (Strict & Non-Recursive for Media) ---
-def get_filtered_urls(sitemap_url):
+# --- 1. Smart Sitemap Fetcher ---
+def get_all_urls(url):
     urls = []
-    ignore_list = ['image', 'video', 'attachment', 'media', 'gallery']
+    ignore = ['image', 'video', 'attachment', 'media']
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(sitemap_url, headers=headers, timeout=15)
+        res = requests.get(url, headers=headers, timeout=15)
         soup = BeautifulSoup(res.content, 'xml')
         for loc in soup.find_all('loc'):
             link = loc.text.strip()
-            # If index sitemap, go deeper only for non-media ones
             if link.endswith('.xml'):
-                if not any(word in link.lower() for word in ignore_list):
-                    urls.extend(get_filtered_urls(link))
+                if not any(x in link.lower() for x in ignore):
+                    urls.extend(get_all_urls(link))
                 continue
-            # Skip media files
-            if not any(link.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp', '.svg', '.pdf']):
+            if not any(link.lower().endswith(ext) for ext in ['.jpg', '.png', '.webp', '.pdf']):
                 urls.append(link)
     except: pass
     return list(set(urls))
 
-# --- 2. Primary Keyword Extractor ---
-def extract_keyword(url, title):
-    # Extracting from Title (removing common brand/stop words)
-    clean_title = re.sub(r'[|,\-–—]|Saree Mela|SareeMela|Home|Shop', '', title, flags=re.IGNORECASE).strip()
-    words = clean_title.split()
-    if words:
-        return " ".join(words[:3]) # Taking first 3 words as Primary Keyword
-    
-    # Fallback: Extract from URL slug
-    slug = url.split('/')[-2] if url.endswith('/') else url.split('/')[-1]
-    keyword = slug.replace('-', ' ').title()
-    return keyword
-
-# --- 3. SEO Data Scraper ---
-def scrape_seo_data(url):
+# --- 2. Professional Scraper & Categorizer ---
+def scrape_data(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=10)
@@ -50,90 +34,83 @@ def scrape_seo_data(url):
         title = soup.title.string.strip() if soup.title else "No Title"
         words = len(soup.get_text().split())
         
-        # Categorization
-        link_low = url.lower()
-        if "/product/" in link_low: p_type = "Product"
-        elif "/category/" in link_low or "/shop/" in link_low: p_type = "Category"
-        elif "/blog/" in link_low or "/post/" in link_low: p_type = "Blog"
-        else: p_type = "Static/Core"
+        l = url.lower()
+        if "/product/" in l: p_type = "Product"
+        elif "/category/" in l or "/product-category/" in l: p_type = "Category"
+        elif "/blog/" in l: p_type = "Blog"
+        else: p_type = "Static Page"
         
-        return title, words, p_type
-    except: return "Error", 0, "Unknown"
+        # Keyword Extraction from Title
+        clean = re.sub(r'[|,\-–—]|Saree Mela|SareeMela|Home|Shop', '', title, flags=re.IGNORECASE).strip()
+        kw = " ".join(clean.split()[:3]) if clean else "N/A"
+        
+        return title, words, p_type, kw
+    except: return "Error", 0, "Unknown", "N/A"
 
-# --- 4. Streamlit UI ---
-st.set_page_config(page_title="Zahidul's Pro SEO Auditor", layout="wide")
-st.title("🛡️ Advanced SEO Auditor (Keywords & Color-Coded Excel)")
-st.write("This version includes **Primary Keyword** extraction and **Styled Excel** downloads.")
+# --- UI Setup ---
+st.set_page_config(page_title="Zahidul's Professional SEO Auditor", layout="wide")
+st.title("🛡️ SEO Auditor (Three-Color Status Icons)")
 
-sitemap_input = st.text_input("Enter Sitemap URL:", placeholder="https://sareemela.com/sitemap_index.xml")
+sitemap_input = st.text_input("Enter Sitemap URL:", value="https://sareemela.com/sitemap_index.xml")
 
-if st.button("Generate Pro Report"):
+if st.button("Run SEO Audit"):
     if sitemap_input:
-        with st.spinner("Analyzing sitemap and extracting keywords..."):
-            all_links = get_filtered_urls(sitemap_input)
-            if all_links:
+        with st.spinner("Analyzing pages and applying status icons..."):
+            links = get_all_urls(sitemap_input)
+            if links:
                 results = []
                 p_bar = st.progress(0)
-                # Limit to 500 for performance stability
-                process_limit = all_links[:500]
+                process_limit = links[:500] 
                 
                 for i, url in enumerate(process_limit):
-                    t, w, pt = scrape_seo_data(url)
-                    pk = extract_keyword(url, t)
-                    results.append({"URL": url, "Title": t, "Words": w, "Type": pt, "Keyword": pk})
+                    t, w, pt, kw = scrape_data(url)
+                    results.append({"URL": url, "Title": t, "Words": w, "Type": pt, "Keyword": kw})
                     p_bar.progress((i + 1) / len(process_limit))
                 
                 df_raw = pd.DataFrame(results)
-                final_audit = []
-                
+                final_list = []
                 for i, row in df_raw.iterrows():
+                    # ডিফল্ট সবুজ বৃত্ত (OK)
                     sev, pri, act, conf = "🟢 OK", "🟢 Maintain", "Keep.", "None"
+                    
                     for j, other in df_raw.iterrows():
                         if i != j and fuzz.token_sort_ratio(row['Title'], other['Title']) > 80:
                             conf = other['URL']
                             if row['Words'] < other['Words']:
+                                # লাল বৃত্ত (CRITICAL)
                                 sev, pri, act = "🔴 CRITICAL", "🔴 P1 - Today", f"Redirect to: {other['URL']}"
                             else:
-                                sev, pri, act = "🟠 HIGH", "🟠 P2 - This Week", "Rewrite Title."
+                                # হলুদ/কমলা বৃত্ত (HIGH)
+                                sev, pri, act = "🟡 HIGH", "🟡 P2 - This Week", "Rewrite Title to differentiate."
                             break
                     
-                    final_audit.append({
-                        "Page Type": row['Type'],
-                        "Severity": sev,
+                    final_list.append({
+                        "Page Type": row['Type'], 
+                        "Severity": sev, # এখানে বৃত্তের কালার চেঞ্জ হবে
                         "Primary Keyword": row['Keyword'],
-                        "URL": row['URL'],
-                        "Conflicting URL": conf,
+                        "URL": row['URL'], 
+                        "Conflicting URL": conf, 
                         "Page Title": row['Title'],
-                        "Words": row['Words'],
-                        "Action Plan": act,
+                        "Words": row['Words'], 
+                        "Action Plan": act, 
                         "Priority": pri
                     })
 
-                complete_df = pd.DataFrame(final_audit)
-
-                # --- 5. Excel Styling Logic ---
+                complete_df = pd.DataFrame(final_list)
+                action_plan_df = complete_df[complete_df['Severity'] != "🟢 OK"].copy()
+                
+                # --- Excel Generation ---
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    complete_df.to_excel(writer, index=False, sheet_name='SEO Audit')
-                    ws = writer.sheets['SEO Audit']
+                    complete_df.to_excel(writer, index=False, sheet_name='Full Audit')
+                    action_plan_df.to_excel(writer, index=False, sheet_name='Action Plan')
                     
-                    # Defining Fills
-                    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-                    orange_fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
-                    
-                    # Applying Column Formatting
-                    for row_idx in range(2, ws.max_row + 1):
-                        sev_cell = ws.cell(row=row_idx, column=2) # Severity Column
-                        if "CRITICAL" in str(sev_cell.value):
-                            sev_cell.fill = red_fill
-                        elif "HIGH" in str(sev_cell.value):
-                            sev_cell.fill = orange_fill
-                
-                st.success("Audit Complete!")
+                    # কলাম উইডথ ফিক্স করা (ঐচ্ছিক কিন্তু সুন্দর দেখায়)
+                    for sheet in ['Full Audit', 'Action Plan']:
+                        ws = writer.sheets[sheet]
+                        for col in ws.columns:
+                            ws.column_dimensions[col[0].column_letter].width = 25
+
+                st.success("Analysis Complete! Action Plan separated.")
                 st.dataframe(complete_df, use_container_width=True)
-                st.download_button(
-                    label="📥 Download Styled Excel Report",
-                    data=output.getvalue(),
-                    file_name="Zahidul_SEO_Audit.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button("📥 Download Styled Excel (Red/Yellow/Green Icons)", output.getvalue(), "SEO_Report_Zahidul.xlsx")
