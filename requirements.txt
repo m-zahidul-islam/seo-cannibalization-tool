@@ -1,7 +1,10 @@
 streamlit
 pandas
-beautifulsoup4
 requests
+beautifulsoup4
 thefuzz
-openpyxl
 lxml
+plotly
+openpyxl
+anthropic
+python-Levenshtein
