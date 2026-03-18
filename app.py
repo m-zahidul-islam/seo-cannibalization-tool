@@ -1,9 +1,13 @@
 """
-Professional SEO Audit Tool v2.0
+Professional SEO Audit Tool v3.0
 By M Zahidul Islam | SEO & Search Visibility Specialist
-─────────────────────────────────────────────────────
+─────────────────────────────────────────────────────────
+Output Format: Matches SareeMela_COMPLETE_FINAL_v3.xlsx exactly
+  Sheet 1: Complete Audit – All Pages (sectioned by page type)
+  Sheet 2: Priority Action Plan
+
 pip install streamlit pandas requests beautifulsoup4 thefuzz
-            lxml plotly openpyxl anthropic python-Levenshtein
+            lxml openpyxl anthropic python-Levenshtein
 """
 
 import streamlit as st
@@ -13,14 +17,12 @@ from bs4 import BeautifulSoup
 from thefuzz import fuzz
 from itertools import combinations
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import plotly.express as px
-import plotly.graph_objects as go
-import io
-import json
-import time
-import logging
-import re
-import anthropic
+import io, json, time, logging, re
+import openpyxl
+from openpyxl.styles import (
+    PatternFill, Font, Alignment, Border, Side
+)
+from openpyxl.utils import get_column_letter
 
 # ─────────────────────────────────────────────────────────────────
 # LOGGING
@@ -28,562 +30,774 @@ import anthropic
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────
-IGNORE_SITEMAP_KEYWORDS = ["image", "video", "attachment", "media", "gallery", "css", "js"]
-IGNORE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".pdf", ".webp", ".svg", ".mp4", ".mp3"]
-HEADERS = {"User-Agent": "Mozilla/5.0 (SEO Auditor Bot/2.0)"}
+IGNORE_SITEMAP_KW  = ["image", "video", "attachment", "media", "gallery"]
+IGNORE_EXTS        = [".jpg",".jpeg",".png",".gif",".pdf",".webp",".svg",".mp4",".mp3"]
+HEADERS            = {"User-Agent": "Mozilla/5.0 (SEO-Auditor/3.0)"}
 
 # ─────────────────────────────────────────────────────────────────
-# 1. SITEMAP FETCHER — Iterative
+# 1. SITEMAP — iterative, no recursion
 # ─────────────────────────────────────────────────────────────────
-def get_filtered_sitemap_urls(sitemap_url: str) -> list[str]:
-    visited, queue, all_urls = set(), [sitemap_url], set()
+def get_sitemap_urls(sitemap_url: str) -> list[str]:
+    visited, queue, found = set(), [sitemap_url], set()
     while queue:
-        current = queue.pop(0)
-        if current in visited:
-            continue
-        visited.add(current)
+        cur = queue.pop(0)
+        if cur in visited: continue
+        visited.add(cur)
         try:
-            res = requests.get(current, headers=HEADERS, timeout=15)
-            res.raise_for_status()
-            soup = BeautifulSoup(res.content, "xml")
+            r = requests.get(cur, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.content, "xml")
             for loc in soup.find_all("loc"):
                 link = loc.text.strip()
                 if link.endswith(".xml"):
-                    if not any(kw in link.lower() for kw in IGNORE_SITEMAP_KEYWORDS):
+                    if not any(kw in link.lower() for kw in IGNORE_SITEMAP_KW):
                         queue.append(link)
-                elif not any(link.lower().endswith(ext) for ext in IGNORE_EXTENSIONS):
-                    all_urls.add(link)
+                elif not any(link.lower().endswith(e) for e in IGNORE_EXTS):
+                    found.add(link)
         except Exception as e:
-            logger.warning(f"Sitemap error [{current}]: {e}")
-            st.warning(f"⚠️ Could not fetch: `{current}`")
-    return list(all_urls)
+            st.warning(f"⚠️ Sitemap error: `{cur}` — {e}")
+    return list(found)
 
 
 # ─────────────────────────────────────────────────────────────────
-# 2. DEEP SEO SCRAPER
+# 2. PAGE TYPE DETECTION
 # ─────────────────────────────────────────────────────────────────
 def detect_page_type(url: str) -> str:
-    u = url.lower()
+    u = url.lower().rstrip("/")
+    if u.count("/") <= 3: return "Homepage" if u.count("/") == 2 else "Static"
     if any(p in u for p in ["/product/", "/products/"]): return "Product"
-    if any(p in u for p in ["/product-category/", "/category/", "/shop/", "/collection/", "/catalog/"]): return "Category"
-    if any(p in u for p in ["/blog/", "/post/", "/news/", "/article/", "/insight/"]): return "Blog"
-    if u.rstrip("/").count("/") <= 3: return "Static/Core"
-    return "Other"
+    if any(p in u for p in ["/product-category/", "/category/", "/shop/", "/collection/"]): return "Category"
+    if any(p in u for p in ["/blog/", "/post/", "/news/", "/article/"]): return "Blog"
+    # WooCommerce nested category
+    if u.count("/") >= 5 and "product" not in u: return "Sub-Cat"
+    return "Static"
 
-def scrape_seo_data(url: str) -> dict:
-    result = {
-        "URL": url, "Type": detect_page_type(url),
-        "Status Code": "Error", "Response Time (ms)": 0,
-        # Title
-        "Title": "Missing", "Title Length": 0,
-        # Meta
-        "Meta Description": "Missing", "Meta Desc Length": 0,
-        # Headings
-        "H1": "Missing", "H1 Count": 0, "H2 Count": 0, "H3 Count": 0,
-        # Technical
-        "Canonical": "Not Set", "Robots Meta": "index",
-        # Content
-        "Word Count": 0,
-        # Schema
-        "Schema Types": "None",
-        # Open Graph
-        "OG Title": "Missing", "OG Description": "Missing", "OG Image": "Missing",
-        # Images
-        "Total Images": 0, "Images Missing Alt": 0,
-        # Links
-        "Internal Links": 0, "External Links": 0,
-        # Score & Issues
-        "SEO Score": 100,
-        "Issues": [],
-    }
 
+# ─────────────────────────────────────────────────────────────────
+# 3. PRIMARY KEYWORD — from URL slug + Title combined
+# ─────────────────────────────────────────────────────────────────
+STOP_WORDS = {
+    "a","an","the","and","or","but","in","on","at","to","for","of","with",
+    "by","from","is","are","was","were","be","been","being","have","has",
+    "had","do","does","did","will","would","could","should","may","might",
+    "this","that","these","those","it","its","my","your","our","their",
+    "what","which","who","how","when","where","why","all","any","both",
+    "com","www","http","https","html","php","asp",
+    # Bengali common stop words in English transliteration
+    "er","te","ke","ba","o","e","i","ar",
+}
+
+def extract_primary_keyword(url: str, title: str) -> str:
+    # From URL slug
+    slug = url.rstrip("/").split("/")[-1]
+    slug_words = re.sub(r"[-_]", " ", slug).lower().split()
+    slug_kw = " ".join(w for w in slug_words if w not in STOP_WORDS and len(w) > 2)
+
+    # From Title — remove site name suffix (e.g. "| SareeMela")
+    clean_title = re.split(r"\s*[\|–\-]\s*[A-Z]", title)[0].strip() if title else ""
+    title_words = clean_title.lower().split()
+    title_kw = " ".join(w for w in title_words if w not in STOP_WORDS and len(w) > 2)
+
+    # Prefer title if longer and more meaningful; fall back to slug
+    if title_kw and len(title_kw) > len(slug_kw):
+        return title_kw[:80]
+    return slug_kw[:80] if slug_kw else clean_title[:80]
+
+
+# ─────────────────────────────────────────────────────────────────
+# 4. RULE-BASED ISSUE + FIX ENGINE
+# ─────────────────────────────────────────────────────────────────
+def rule_based_analysis(page: dict, cannibal_info: dict) -> tuple[str, str, str, str]:
+    """
+    Returns: (severity, issue, recommended_fix, priority)
+    """
+    issues   = []
+    fixes    = []
+    severity = "🟢 OK"
+    priority = "🟢 LOW/OK"
+
+    # ── Cannibalization ──────────────────────────────────────
+    if cannibal_info.get("score", 0) >= 95:
+        issues.append(f"Exact title duplicate with: {cannibal_info['url']}")
+        fixes.append(f"301 Redirect weaker page → {cannibal_info['url']}")
+        severity = "🔴 CRITICAL"; priority = "🔴 P1 — Today"
+    elif cannibal_info.get("score", 0) >= 85:
+        issues.append(f"High title overlap ({cannibal_info['score']}%) with: {cannibal_info['url']}")
+        fixes.append("Rewrite title to target distinct search intent")
+        severity = "🟠 HIGH"; priority = "🟠 P2 — This Week"
+    elif cannibal_info.get("score", 0) >= 75:
+        issues.append(f"Moderate title overlap ({cannibal_info['score']}%) with: {cannibal_info['url']}")
+        fixes.append("Differentiate content focus and update meta title")
+        severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── Status Code ──────────────────────────────────────────
+    sc = page.get("status_code", 200)
+    if sc == 404:
+        issues.append("404 Not Found — Page is dead")
+        fixes.append("Either restore the page or 301 redirect to relevant live URL")
+        severity = "🔴 CRITICAL"; priority = "🔴 P1 — Today"
+    elif sc in [301, 302]:
+        issues.append(f"{sc} Redirect detected")
+        fixes.append("Update all internal links to point directly to final destination URL")
+        if severity == "🟢 OK": severity = "🟠 HIGH"; priority = "🟠 P2 — This Week"
+
+    # ── Title ────────────────────────────────────────────────
+    title = page.get("title", "")
+    tlen  = len(title)
+    if not title or title == "Missing":
+        issues.append("Missing <title> tag")
+        fixes.append("Write a unique, keyword-rich title (50–60 chars)")
+        if severity == "🟢 OK": severity = "🔴 CRITICAL"; priority = "🔴 P1 — Today"
+    elif tlen > 60:
+        issues.append(f"Title too long ({tlen} chars, max 60)")
+        fixes.append(f"Shorten title to under 60 chars. Keep primary keyword at start.")
+        if severity == "🟢 OK": severity = "🟠 HIGH"; priority = "🟠 P2 — This Week"
+    elif tlen < 30:
+        issues.append(f"Title too short ({tlen} chars, min 30)")
+        fixes.append("Expand title with supporting keyword or location modifier")
+        if severity == "🟢 OK": severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── Meta Description ─────────────────────────────────────
+    md     = page.get("meta_desc", "")
+    mdlen  = len(md)
+    if not md or md == "Missing":
+        issues.append("Missing meta description")
+        fixes.append("Write a compelling 120–155 char meta description with CTA")
+        if severity == "🟢 OK": severity = "🟠 HIGH"; priority = "🟠 P2 — This Week"
+    elif mdlen > 160:
+        issues.append(f"Meta description too long ({mdlen} chars)")
+        fixes.append("Trim to under 160 chars. Keep key selling point in first 120.")
+        if severity == "🟢 OK": severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── H1 ───────────────────────────────────────────────────
+    h1_count = page.get("h1_count", 0)
+    if h1_count == 0:
+        issues.append("Missing H1 tag")
+        fixes.append("Add a single H1 containing the primary keyword")
+        if severity == "🟢 OK": severity = "🟠 HIGH"; priority = "🟠 P2 — This Week"
+    elif h1_count > 1:
+        issues.append(f"Multiple H1 tags found ({h1_count})")
+        fixes.append("Keep only one H1. Convert extras to H2 or H3.")
+        if severity == "🟢 OK": severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── Canonical ────────────────────────────────────────────
+    canonical = page.get("canonical", "")
+    if not canonical:
+        issues.append("No canonical tag")
+        fixes.append("Add self-referencing canonical tag to prevent duplicate content")
+        if severity == "🟢 OK": severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── Noindex ──────────────────────────────────────────────
+    robots = page.get("robots_meta", "index")
+    if "noindex" in robots.lower():
+        issues.append("⚠️ Noindex meta robots — page excluded from Google")
+        fixes.append("Remove noindex directive unless page is intentionally excluded")
+        severity = "🔴 CRITICAL"; priority = "🔴 P1 — Today"
+
+    # ── Schema ───────────────────────────────────────────────
+    schema = page.get("schema_types", "None")
+    page_type = page.get("page_type", "")
+    if schema == "None":
+        if page_type == "Product":
+            issues.append("No Schema Markup (Product schema missing)")
+            fixes.append("Add Product schema with name, price, availability, review")
+        elif page_type in ["Category", "Sub-Cat"]:
+            issues.append("No Schema Markup (BreadcrumbList missing)")
+            fixes.append("Add BreadcrumbList schema for category navigation")
+        else:
+            issues.append("No Schema Markup")
+            fixes.append("Add relevant schema (WebPage, Article, BreadcrumbList)")
+        if severity == "🟢 OK": severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── Thin Content ─────────────────────────────────────────
+    words = page.get("word_count", 0)
+    if words < 300 and page_type not in ["Homepage"]:
+        issues.append(f"Thin content ({words} words, min 300)")
+        fixes.append("Expand content with product details, FAQs, or buying guide")
+        if severity == "🟢 OK": severity = "🟡 MEDIUM"; priority = "🟡 P3 — This Month"
+
+    # ── OG Image ─────────────────────────────────────────────
+    og_img = page.get("og_image", "Missing")
+    if og_img == "Missing":
+        issues.append("Missing OG Image (social sharing broken)")
+        fixes.append("Add og:image meta tag with a high-quality product/category image")
+        if severity == "🟢 OK": severity = "🔵 INFO"; priority = "🟢 P4 — Ongoing"
+
+    # ── All clear ────────────────────────────────────────────
+    if not issues:
+        return "🟢 OK", "No issues detected", "Keep current optimization. Monitor rankings.", "🟢 LOW/OK"
+
+    return severity, " | ".join(issues), " | ".join(fixes), priority
+
+
+# ─────────────────────────────────────────────────────────────────
+# 5. AI-ENHANCED FIX (Claude API — optional)
+# ─────────────────────────────────────────────────────────────────
+def ai_fix(page: dict, rule_issue: str, rule_fix: str, api_key: str) -> str:
+    """Enhances rule-based fix with AI-generated specific recommendation."""
     try:
-        start = time.time()
-        res = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
-        result["Response Time (ms)"] = round((time.time() - start) * 1000)
-        result["Status Code"] = res.status_code
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = f"""You are an expert SEO specialist. Given this page data, write ONE concise recommended fix (max 2 sentences, actionable, specific).
 
+URL: {page.get('url', '')}
+Page Type: {page.get('page_type', '')}
+Title: {page.get('title', '')}
+Primary Keyword: {page.get('primary_keyword', '')}
+Issues Found: {rule_issue}
+Rule-based Fix: {rule_fix}
+
+Respond with ONLY the improved recommended fix. No preamble."""
+
+        msg = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return msg.content[0].text.strip()
+    except Exception as e:
+        logger.warning(f"AI fix failed: {e}")
+        return rule_fix
+
+
+# ─────────────────────────────────────────────────────────────────
+# 6. PAGE SCRAPER
+# ─────────────────────────────────────────────────────────────────
+def scrape_page(url: str) -> dict:
+    result = {
+        "url": url, "page_type": detect_page_type(url),
+        "status_code": 0, "title": "Missing", "title_length": 0,
+        "meta_desc": "Missing", "meta_desc_length": 0,
+        "h1": "Missing", "h1_count": 0,
+        "canonical": "", "robots_meta": "index",
+        "word_count": 0, "schema_types": "None",
+        "og_image": "Missing", "response_ms": 0,
+    }
+    try:
+        t0 = time.time()
+        res = requests.get(url, headers=HEADERS, timeout=12, allow_redirects=True)
+        result["response_ms"]  = round((time.time() - t0) * 1000)
+        result["status_code"]  = res.status_code
         if res.status_code != 200:
-            result["Issues"].append(f"Non-200 Status: {res.status_code}")
-            result["SEO Score"] -= 40
-            result["Issues"] = "; ".join(result["Issues"])
             return result
 
         soup = BeautifulSoup(res.text, "html.parser")
-        domain = re.findall(r"https?://[^/]+", url)[0] if re.findall(r"https?://[^/]+", url) else ""
 
-        # ── Title ──────────────────────────────────────────────
-        title_tag = soup.find("title")
-        title = title_tag.string.strip() if title_tag and title_tag.string else ""
-        result["Title"] = title if title else "Missing"
-        result["Title Length"] = len(title)
-        if not title:
-            result["Issues"].append("Missing Title"); result["SEO Score"] -= 20
-        elif len(title) > 60:
-            result["Issues"].append("Title Too Long (>60 chars)"); result["SEO Score"] -= 5
-        elif len(title) < 30:
-            result["Issues"].append("Title Too Short (<30 chars)"); result["SEO Score"] -= 5
+        # Title
+        tt = soup.find("title")
+        title = tt.string.strip() if tt and tt.string else ""
+        result["title"]        = title or "Missing"
+        result["title_length"] = len(title)
 
-        # ── Meta Description ───────────────────────────────────
-        meta_tag = soup.find("meta", attrs={"name": "description"})
-        if meta_tag:
-            md = meta_tag.get("content", "").strip()
-            result["Meta Description"] = md or "Empty"
-            result["Meta Desc Length"] = len(md)
-            if not md:
-                result["Issues"].append("Empty Meta Description"); result["SEO Score"] -= 10
-            elif len(md) > 160:
-                result["Issues"].append("Meta Desc Too Long (>160)"); result["SEO Score"] -= 3
-            elif len(md) < 70:
-                result["Issues"].append("Meta Desc Too Short (<70)"); result["SEO Score"] -= 3
-        else:
-            result["Issues"].append("Missing Meta Description"); result["SEO Score"] -= 10
+        # Meta desc
+        mt = soup.find("meta", attrs={"name": "description"})
+        if mt:
+            md = mt.get("content", "").strip()
+            result["meta_desc"]        = md or "Missing"
+            result["meta_desc_length"] = len(md)
 
-        # ── Headings ───────────────────────────────────────────
+        # H1
         h1s = soup.find_all("h1")
-        result["H1 Count"] = len(h1s)
-        result["H2 Count"] = len(soup.find_all("h2"))
-        result["H3 Count"] = len(soup.find_all("h3"))
-        if not h1s:
-            result["H1"] = "Missing"; result["Issues"].append("Missing H1"); result["SEO Score"] -= 15
-        elif len(h1s) > 1:
-            result["H1"] = h1s[0].get_text(strip=True)
-            result["Issues"].append(f"Multiple H1s ({len(h1s)})"); result["SEO Score"] -= 8
-        else:
-            result["H1"] = h1s[0].get_text(strip=True)
+        result["h1_count"] = len(h1s)
+        result["h1"]       = h1s[0].get_text(strip=True) if h1s else "Missing"
 
-        # ── Canonical ──────────────────────────────────────────
-        can_tag = soup.find("link", rel="canonical")
-        if can_tag:
-            canonical = can_tag.get("href", "").strip()
-            result["Canonical"] = canonical or "Empty"
-            if canonical and canonical.rstrip("/") != url.rstrip("/"):
-                result["Issues"].append("Canonical → Different URL"); result["SEO Score"] -= 10
-        else:
-            result["Issues"].append("No Canonical Tag"); result["SEO Score"] -= 5
+        # Canonical
+        ct = soup.find("link", rel="canonical")
+        result["canonical"] = ct.get("href", "").strip() if ct else ""
 
-        # ── Robots Meta ────────────────────────────────────────
-        robots_tag = soup.find("meta", attrs={"name": "robots"})
-        if robots_tag:
-            robots = robots_tag.get("content", "index").lower()
-            result["Robots Meta"] = robots
-            if "noindex" in robots:
-                result["Issues"].append("⚠️ NOINDEX — Excluded from Google"); result["SEO Score"] -= 50
+        # Robots
+        rt = soup.find("meta", attrs={"name": "robots"})
+        if rt: result["robots_meta"] = rt.get("content", "index").lower()
 
-        # ── Word Count ─────────────────────────────────────────
+        # Word count
         body = soup.find("body")
-        if body:
-            result["Word Count"] = len(body.get_text(separator=" ", strip=True).split())
-        if result["Word Count"] < 300:
-            result["Issues"].append("Thin Content (<300 words)"); result["SEO Score"] -= 8
+        if body: result["word_count"] = len(body.get_text(" ", strip=True).split())
 
-        # ── Schema / Structured Data ───────────────────────────
-        schema_scripts = soup.find_all("script", type="application/ld+json")
-        schema_types = []
-        for s in schema_scripts:
+        # Schema
+        scripts = soup.find_all("script", type="application/ld+json")
+        types = []
+        for s in scripts:
             try:
-                data = json.loads(s.string or "")
-                if isinstance(data, list):
-                    schema_types.extend([d.get("@type", "") for d in data if isinstance(d, dict)])
-                elif isinstance(data, dict):
-                    st_val = data.get("@type", "")
-                    if isinstance(st_val, list): schema_types.extend(st_val)
-                    elif st_val: schema_types.append(st_val)
-            except Exception:
-                pass
-        result["Schema Types"] = ", ".join(schema_types) if schema_types else "None"
-        if not schema_types:
-            result["Issues"].append("No Schema Markup"); result["SEO Score"] -= 5
+                d = json.loads(s.string or "")
+                if isinstance(d, list):
+                    types += [x.get("@type","") for x in d if isinstance(x, dict)]
+                elif isinstance(d, dict):
+                    t = d.get("@type","")
+                    types += t if isinstance(t, list) else ([t] if t else [])
+            except: pass
+        result["schema_types"] = ", ".join(types) if types else "None"
 
-        # ── Open Graph ─────────────────────────────────────────
-        og_title = soup.find("meta", property="og:title")
-        og_desc = soup.find("meta", property="og:description")
-        og_img = soup.find("meta", property="og:image")
-        result["OG Title"] = og_title["content"].strip() if og_title and og_title.get("content") else "Missing"
-        result["OG Description"] = og_desc["content"].strip() if og_desc and og_desc.get("content") else "Missing"
-        result["OG Image"] = og_img["content"].strip() if og_img and og_img.get("content") else "Missing"
-        if result["OG Title"] == "Missing":
-            result["Issues"].append("Missing OG Title"); result["SEO Score"] -= 3
-        if result["OG Image"] == "Missing":
-            result["Issues"].append("Missing OG Image"); result["SEO Score"] -= 3
+        # OG image
+        og = soup.find("meta", property="og:image")
+        result["og_image"] = og["content"].strip() if og and og.get("content") else "Missing"
 
-        # ── Images Alt Text ────────────────────────────────────
-        images = soup.find_all("img")
-        result["Total Images"] = len(images)
-        missing_alt = sum(1 for img in images if not img.get("alt", "").strip())
-        result["Images Missing Alt"] = missing_alt
-        if missing_alt > 0:
-            result["Issues"].append(f"{missing_alt} Images Missing Alt Text"); result["SEO Score"] -= min(missing_alt * 2, 10)
-
-        # ── Internal / External Links ──────────────────────────
-        all_links = soup.find_all("a", href=True)
-        internal = sum(1 for a in all_links if domain in a["href"] or a["href"].startswith("/"))
-        external = sum(1 for a in all_links if a["href"].startswith("http") and domain not in a["href"])
-        result["Internal Links"] = internal
-        result["External Links"] = external
-
-        # ── Response Time Warning ──────────────────────────────
-        if result["Response Time (ms)"] > 3000:
-            result["Issues"].append(f"Slow Response ({result['Response Time (ms)']}ms)"); result["SEO Score"] -= 5
+        # Primary keyword
+        result["primary_keyword"] = extract_primary_keyword(url, result["title"])
 
     except requests.exceptions.Timeout:
-        result["Issues"].append("Request Timeout"); result["SEO Score"] = 0
-    except requests.exceptions.ConnectionError:
-        result["Issues"].append("Connection Error"); result["SEO Score"] = 0
+        result["status_code"] = "Timeout"
     except Exception as e:
-        result["Issues"].append(f"Scrape Error: {str(e)[:80]}"); result["SEO Score"] = 0
+        result["status_code"] = f"Error: {str(e)[:40]}"
 
-    result["SEO Score"] = max(0, result["SEO Score"])
-    result["Issues"] = "; ".join(result["Issues"]) if result["Issues"] else "✅ None"
+    if "primary_keyword" not in result:
+        result["primary_keyword"] = extract_primary_keyword(url, result.get("title",""))
     return result
 
 
 # ─────────────────────────────────────────────────────────────────
-# 3. PARALLEL SCRAPER
+# 7. PARALLEL SCRAPER
 # ─────────────────────────────────────────────────────────────────
-def scrape_all_urls(urls: list[str], max_workers: int = 10) -> list[dict]:
+def scrape_all(urls: list[str], workers: int = 10) -> list[dict]:
     results = [None] * len(urls)
-    progress = st.progress(0)
+    bar = st.progress(0)
     status = st.empty()
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(scrape_seo_data, url): i for i, url in enumerate(urls)}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        fmap = {ex.submit(scrape_page, u): i for i, u in enumerate(urls)}
         done = 0
-        for future in as_completed(future_map):
-            idx = future_map[future]
-            try:
-                results[idx] = future.result()
+        for f in as_completed(fmap):
+            idx = fmap[f]
+            try: results[idx] = f.result()
             except Exception as e:
-                results[idx] = {"URL": urls[idx], "Issues": f"Thread Error: {e}", "SEO Score": 0}
+                results[idx] = {"url": urls[idx], "status_code": f"Error", "title": "Error",
+                                 "page_type": detect_page_type(urls[idx]),
+                                 "primary_keyword": extract_primary_keyword(urls[idx], "")}
             done += 1
-            progress.progress(done / len(urls))
-            status.caption(f"Scanning {done}/{len(urls)} pages...")
+            bar.progress(done / len(urls))
+            status.caption(f"Scanning {done}/{len(urls)} pages…")
     status.empty()
-    return [r for r in results if r is not None]
+    return [r for r in results if r]
 
 
 # ─────────────────────────────────────────────────────────────────
-# 4. CANNIBALIZATION DETECTION
+# 8. CANNIBALIZATION DETECTION
 # ─────────────────────────────────────────────────────────────────
-def detect_cannibalization(df: pd.DataFrame) -> pd.DataFrame:
-    n = len(df)
-    conflict_url = ["None"] * n
-    conflict_score = [0] * n
-    severity = ["🟢 OK"] * n
-    cannibal_action = ["No cannibalization detected."] * n
-
+def detect_cannibalization(pages: list[dict]) -> dict[int, dict]:
+    """Returns {index: {url, score}} for each page that has a conflict."""
+    n = len(pages)
+    best = {}  # index → {url, score}
     for i, j in combinations(range(n), 2):
-        score = fuzz.token_sort_ratio(str(df.at[i, "Title"]), str(df.at[j, "Title"]))
-        if score > 80:
-            if score > conflict_score[i]:
-                conflict_score[i] = score
-                conflict_url[i] = df.at[j, "URL"]
-            if score > conflict_score[j]:
-                conflict_score[j] = score
-                conflict_url[j] = df.at[i, "URL"]
-
-    for i in range(n):
-        if conflict_url[i] != "None":
-            s = conflict_score[i]
-            if s >= 95:
-                severity[i] = "🔴 CRITICAL"
-                cannibal_action[i] = f"Consolidate or redirect to: {conflict_url[i]}"
-            elif s >= 85:
-                severity[i] = "🟠 HIGH"
-                cannibal_action[i] = "Rewrite title to target a distinct search intent."
-            else:
-                severity[i] = "🟡 MEDIUM"
-                cannibal_action[i] = "Review content overlap and differentiate focus keywords."
-
-    df["Cannibal URL"] = conflict_url
-    df["Cannibal Score"] = conflict_score
-    df["Cannibalization"] = severity
-    df["Cannibal Action"] = cannibal_action
-    return df
+        ti = str(pages[i].get("title",""))
+        tj = str(pages[j].get("title",""))
+        score = fuzz.token_sort_ratio(ti, tj)
+        if score > 75:
+            if score > best.get(i, {}).get("score", 0):
+                best[i] = {"url": pages[j]["url"], "score": score}
+            if score > best.get(j, {}).get("score", 0):
+                best[j] = {"url": pages[i]["url"], "score": score}
+    return best
 
 
 # ─────────────────────────────────────────────────────────────────
-# 5. AI ACTION PLAN via Anthropic API
+# 9. AI PRIORITY ACTION PLAN (whole-site summary)
 # ─────────────────────────────────────────────────────────────────
-def generate_ai_action_plan(issues_summary: str, api_key: str) -> str:
-    """
-    Sends a batch of SEO issues to Claude and gets a prioritized action plan.
-    """
+def generate_priority_plan_ai(audit_rows: list[dict], api_key: str) -> list[dict]:
+    """Ask Claude to generate the Priority Action Plan sheet rows."""
     try:
+        import anthropic
         client = anthropic.Anthropic(api_key=api_key)
-        message = client.messages.create(
+
+        critical = [r for r in audit_rows if "CRITICAL" in r.get("Severity","") or "P1" in r.get("Priority","")][:10]
+        high     = [r for r in audit_rows if "HIGH" in r.get("Severity","") or "P2" in r.get("Priority","")][:10]
+
+        summary_lines = []
+        for r in critical + high:
+            summary_lines.append(
+                f"- [{r['Page Type']}] {r['URL']}\n"
+                f"  Issue: {r['Issue / Problem']}\n"
+                f"  Current fix: {r['Recommended Fix']}"
+            )
+
+        prompt = f"""You are a senior SEO strategist. Based on these audit findings, generate a prioritized action plan.
+
+AUDIT FINDINGS:
+{chr(10).join(summary_lines)}
+
+Return a JSON array of action items. Each item must have exactly these keys:
+- "Priority": one of "🔴 P1 — Today", "🟠 P2 — This Week", "🟡 P3 — This Month", "🟢 P4 — Ongoing"
+- "Action Required": specific SEO action (1 sentence)
+- "URL(s) Affected": the URL or "Multiple pages"
+- "Expected Impact": business/SEO impact (short phrase)
+
+Return ONLY valid JSON array. No explanation. No markdown."""
+
+        msg = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1500,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"""You are an expert SEO strategist. Below is a summary of SEO issues found across a website audit.
-
-{issues_summary}
-
-Please provide:
-1. Top 5 highest-priority fixes with clear reasoning
-2. Quick wins (can fix in <1 hour)
-3. Long-term strategy recommendations
-
-Be specific, concise, and actionable. Format with clear headings."""
-                }
-            ]
+            max_tokens=2000,
+            messages=[{"role": "user", "content": prompt}]
         )
-        return message.content[0].text
-    except anthropic.AuthenticationError:
-        return "❌ Invalid API Key. Please check your Anthropic API key."
+        raw = msg.content[0].text.strip()
+        raw = re.sub(r"^```json|^```|```$", "", raw, flags=re.MULTILINE).strip()
+        return json.loads(raw)
     except Exception as e:
-        return f"❌ AI Error: {str(e)}"
-
-
-def build_issues_summary(df: pd.DataFrame) -> str:
-    total = len(df)
-    avg_score = round(df["SEO Score"].mean(), 1) if "SEO Score" in df.columns else "N/A"
-
-    issue_counts = {}
-    for issues_str in df["Issues"].dropna():
-        for issue in issues_str.split(";"):
-            issue = issue.strip()
-            if issue and issue != "✅ None":
-                issue_counts[issue] = issue_counts.get(issue, 0) + 1
-
-    top_issues = sorted(issue_counts.items(), key=lambda x: x[1], reverse=True)[:15]
-    issue_lines = "\n".join([f"- {issue}: {count} pages" for issue, count in top_issues])
-
-    noindex = df["Robots Meta"].str.contains("noindex", na=False).sum() if "Robots Meta" in df.columns else 0
-    missing_schema = (df["Schema Types"] == "None").sum() if "Schema Types" in df.columns else 0
-    missing_h1 = (df["H1"] == "Missing").sum() if "H1" in df.columns else 0
-
-    return f"""Website SEO Audit Summary
-Total Pages Audited: {total}
-Average SEO Score: {avg_score}/100
-Noindex Pages: {noindex}
-Pages Missing Schema: {missing_schema}
-Pages Missing H1: {missing_h1}
-
-Top Issues Found:
-{issue_lines}
-"""
+        logger.warning(f"AI action plan failed: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────
-# 6. CHARTS
+# 10. RULE-BASED PRIORITY ACTION PLAN
 # ─────────────────────────────────────────────────────────────────
-def render_charts(df: pd.DataFrame):
-    col1, col2 = st.columns(2)
+def build_rule_action_plan(audit_rows: list[dict]) -> list[dict]:
+    plan = []
+    priority_order = ["🔴 P1 — Today", "🟠 P2 — This Week", "🟡 P3 — This Month", "🟢 P4 — Ongoing"]
+    for row in audit_rows:
+        if row.get("Severity") in ["🟢 OK", "🔵 INFO"]:
+            continue
+        plan.append({
+            "Priority":        row.get("Priority", "🟢 P4 — Ongoing"),
+            "Action Required": row.get("Recommended Fix", "")[:200],
+            "URL(s) Affected": row.get("URL",""),
+            "Expected Impact": _impact_for(row.get("Issue / Problem", ""), row.get("Page Type",""))
+        })
+    plan.sort(key=lambda x: priority_order.index(x["Priority"]) if x["Priority"] in priority_order else 99)
+    return plan
 
-    with col1:
-        score_bins = pd.cut(df["SEO Score"], bins=[0, 40, 60, 80, 100],
-                            labels=["0-40 🔴", "41-60 🟠", "61-80 🟡", "81-100 🟢"])
-        score_dist = score_bins.value_counts().sort_index()
-        fig = px.bar(x=score_dist.index, y=score_dist.values,
-                     color=score_dist.index,
-                     color_discrete_map={"0-40 🔴": "#e74c3c", "41-60 🟠": "#e67e22",
-                                         "61-80 🟡": "#f1c40f", "81-100 🟢": "#2ecc71"},
-                     labels={"x": "SEO Score Range", "y": "Page Count"},
-                     title="SEO Score Distribution")
-        fig.update_layout(showlegend=False, height=320)
-        st.plotly_chart(fig, use_container_width=True)
 
-    with col2:
-        type_counts = df["Type"].value_counts()
-        fig2 = px.pie(values=type_counts.values, names=type_counts.index,
-                      title="Pages by Type", hole=0.4)
-        fig2.update_layout(height=320)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        issue_counts = {}
-        for issues_str in df["Issues"].dropna():
-            for issue in issues_str.split(";"):
-                issue = issue.strip()
-                if issue and issue != "✅ None":
-                    issue_counts[issue] = issue_counts.get(issue, 0) + 1
-        if issue_counts:
-            top = sorted(issue_counts.items(), key=lambda x: x[1], reverse=True)[:8]
-            fig3 = px.bar(x=[t[1] for t in top], y=[t[0] for t in top],
-                          orientation="h", title="Top SEO Issues",
-                          labels={"x": "# Pages Affected", "y": "Issue"},
-                          color_discrete_sequence=["#e74c3c"])
-            fig3.update_layout(height=340, yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig3, use_container_width=True)
-
-    with col4:
-        if "Response Time (ms)" in df.columns:
-            fig4 = px.histogram(df, x="Response Time (ms)", nbins=20,
-                                title="Page Response Time Distribution",
-                                color_discrete_sequence=["#3498db"])
-            fig4.add_vline(x=1000, line_dash="dash", line_color="orange", annotation_text="1s target")
-            fig4.add_vline(x=3000, line_dash="dash", line_color="red", annotation_text="3s warning")
-            fig4.update_layout(height=340)
-            st.plotly_chart(fig4, use_container_width=True)
+def _impact_for(issue: str, page_type: str) -> str:
+    issue_l = issue.lower()
+    if "404"       in issue_l: return "Recovers crawl budget & lost backlinks"
+    if "noindex"   in issue_l: return "Restores Google indexing for this page"
+    if "duplicate" in issue_l or "cannibal" in issue_l:
+        return "Consolidates ranking signals, improves position"
+    if "title"     in issue_l: return "Improves CTR in search results"
+    if "meta desc" in issue_l: return "Boosts click-through rate from SERPs"
+    if "h1"        in issue_l: return "Strengthens on-page keyword relevance"
+    if "schema"    in issue_l: return "Enables rich snippets in search results"
+    if "thin"      in issue_l: return "Improves content quality score & rankings"
+    if "canonical" in issue_l: return "Prevents duplicate content dilution"
+    if "og image"  in issue_l: return "Improves social media click-through"
+    return "Improves overall SEO health"
 
 
 # ─────────────────────────────────────────────────────────────────
-# 7. STREAMLIT UI
+# 11. EXCEL REPORT — SareeMela format exactly
 # ─────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="SEO Audit Tool v2 | Zahidul Islam", layout="wide", page_icon="🛡️")
+SEVERITY_COLORS = {
+    "🔴 CRITICAL": "FFCDD2",
+    "🟠 HIGH":     "FFE0B2",
+    "🟡 MEDIUM":   "FFF9C4",
+    "🟢 OK":       "E8F5E9",
+    "🔵 INFO":     "E3F2FD",
+}
+PRIORITY_COLORS = {
+    "🔴 P1 — Today":       "FFCDD2",
+    "🟠 P2 — This Week":   "FFE0B2",
+    "🟡 P3 — This Month":  "FFF9C4",
+    "🟢 P4 — Ongoing":     "E8F5E9",
+    "🟢 LOW/OK":           "E8F5E9",
+}
+SECTION_ORDER = ["Homepage", "Static", "Category", "Sub-Cat", "Blog", "Product"]
 
-# Header
+def _fill(hex_color):
+    return PatternFill("solid", fgColor=hex_color)
+
+def _border():
+    thin = Side(style="thin", color="CCCCCC")
+    return Border(left=thin, right=thin, top=thin, bottom=thin)
+
+def build_excel_report(audit_rows: list[dict], action_plan: list[dict], site_url: str) -> bytes:
+    wb = openpyxl.Workbook()
+
+    # ── SHEET 1: Complete Audit ────────────────────────────────
+    ws1 = wb.active
+    ws1.title = "Complete Audit – All Pages"
+
+    # Big title row
+    site_name = re.sub(r"https?://", "", site_url).split("/")[0]
+    from datetime import datetime
+    month_year = datetime.now().strftime("%B %Y")
+
+    ws1.merge_cells("A1:I1")
+    ws1["A1"] = (
+        f"{site_name} — COMPLETE Keyword Cannibalization Report  |  "
+        f"Every Single Page Audited  |  "
+        f"Static + Category + Blog + Products  |  {month_year}"
+    )
+    ws1["A1"].font      = Font(bold=True, size=11, color="FFFFFF")
+    ws1["A1"].fill      = _fill("1A237E")
+    ws1["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws1.row_dimensions[1].height = 30
+
+    # Legend row
+    ws1.merge_cells("A2:I2")
+    ws1["A2"] = (
+        "🔴 CRITICAL = Fix Today  |  🟠 HIGH = This Week  |  "
+        "🟡 MEDIUM = This Month  |  🟢 LOW/OK = Monitor/No Action  |  🔵 INFO = No Cannibalization Risk"
+    )
+    ws1["A2"].font      = Font(italic=True, size=9, color="333333")
+    ws1["A2"].fill      = _fill("F5F5F5")
+    ws1["A2"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws1.row_dimensions[2].height = 20
+
+    # Column headers
+    col_headers = ["#", "Page Type", "Severity", "URL",
+                   "Page Title (Fetched Live)", "Primary Keyword",
+                   "Issue / Problem", "Recommended Fix", "Priority"]
+    col_widths   = [5, 10, 13, 45, 40, 28, 40, 45, 18]
+
+    ws1.append(col_headers)
+    header_row = ws1.max_row
+    for col_idx, (hdr, width) in enumerate(zip(col_headers, col_widths), 1):
+        cell = ws1.cell(row=header_row, column=col_idx)
+        cell.font      = Font(bold=True, color="FFFFFF", size=10)
+        cell.fill      = _fill("283593")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border    = _border()
+        ws1.column_dimensions[get_column_letter(col_idx)].width = width
+    ws1.row_dimensions[header_row].height = 22
+
+    # Group rows by section
+    grouped = {s: [] for s in SECTION_ORDER}
+    for row in audit_rows:
+        pt = row.get("Page Type", "Static")
+        grouped.setdefault(pt, []).append(row)
+
+    row_num = header_row + 1
+    counter = 1
+
+    for section in SECTION_ORDER:
+        rows = grouped.get(section, [])
+        if not rows: continue
+
+        # Section divider
+        ws1.merge_cells(f"A{row_num}:I{row_num}")
+        label = f"━━━  SECTION — {section.upper()} PAGES  ({len(rows)} Pages)  ━━━"
+        cell = ws1.cell(row=row_num, column=1, value=label)
+        cell.font      = Font(bold=True, size=10, color="FFFFFF")
+        cell.fill      = _fill("37474F")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws1.row_dimensions[row_num].height = 18
+        row_num += 1
+
+        for r in rows:
+            sev   = r.get("Severity", "🟢 OK")
+            color = SEVERITY_COLORS.get(sev, "FFFFFF")
+            vals  = [
+                counter,
+                r.get("Page Type",""),
+                sev,
+                r.get("URL",""),
+                r.get("Page Title",""),
+                r.get("Primary Keyword",""),
+                r.get("Issue / Problem",""),
+                r.get("Recommended Fix",""),
+                r.get("Priority",""),
+            ]
+            for col_idx, val in enumerate(vals, 1):
+                cell = ws1.cell(row=row_num, column=col_idx, value=val)
+                cell.fill      = _fill(color)
+                cell.border    = _border()
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                if col_idx == 4:   # URL — make it a hyperlink style
+                    cell.font = Font(color="1565C0", underline="single", size=9)
+                elif col_idx in [1, 2, 3, 9]:
+                    cell.alignment = Alignment(horizontal="center", vertical="top")
+                    cell.font = Font(size=9)
+                else:
+                    cell.font = Font(size=9)
+            ws1.row_dimensions[row_num].height = 40
+            row_num += 1
+            counter += 1
+
+    ws1.freeze_panes = "A4"
+
+    # ── SHEET 2: Priority Action Plan ─────────────────────────
+    ws2 = wb.create_sheet("Priority Action Plan")
+
+    site_name2 = re.sub(r"https?://", "", site_url).split("/")[0]
+    ws2.merge_cells("A1:D1")
+    ws2["A1"] = (
+        f"{site_name2} — Priority Action Plan  |  "
+        "P1 Fix Today → P2 This Week → P3 This Month → P4 Ongoing"
+    )
+    ws2["A1"].font      = Font(bold=True, size=11, color="FFFFFF")
+    ws2["A1"].fill      = _fill("1A237E")
+    ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws2.row_dimensions[1].height = 28
+
+    plan_headers = ["Priority", "Action Required", "URL(s) Affected", "Expected Impact"]
+    plan_widths  = [22, 60, 50, 38]
+    ws2.append(plan_headers)
+    hrow = ws2.max_row
+    for col_idx, (hdr, w) in enumerate(zip(plan_headers, plan_widths), 1):
+        cell = ws2.cell(row=hrow, column=col_idx)
+        cell.font      = Font(bold=True, color="FFFFFF", size=10)
+        cell.fill      = _fill("283593")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border    = _border()
+        ws2.column_dimensions[get_column_letter(col_idx)].width = w
+    ws2.row_dimensions[hrow].height = 20
+
+    for item in action_plan:
+        pri   = item.get("Priority","🟢 P4 — Ongoing")
+        color = PRIORITY_COLORS.get(pri, "FFFFFF")
+        vals  = [
+            pri,
+            item.get("Action Required",""),
+            item.get("URL(s) Affected",""),
+            item.get("Expected Impact",""),
+        ]
+        rn = ws2.max_row + 1
+        for col_idx, val in enumerate(vals, 1):
+            cell = ws2.cell(row=rn, column=col_idx, value=val)
+            cell.fill      = _fill(color)
+            cell.border    = _border()
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.font      = Font(size=9, bold=(col_idx==1))
+        ws2.row_dimensions[rn].height = 35
+
+    ws2.freeze_panes = "A3"
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────
+# 12. STREAMLIT UI
+# ─────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="SEO Audit Tool v3 | Zahidul Islam",
+    layout="wide", page_icon="🛡️"
+)
+
 st.markdown("""
-<div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-     padding: 2rem; border-radius: 12px; margin-bottom: 1.5rem;'>
-    <h1 style='color: white; margin: 0; font-size: 2rem;'>🛡️ Professional SEO Audit Tool</h1>
-    <p style='color: #a0aec0; margin: 0.5rem 0 0 0;'>
-        Deep Technical + On-Page + Schema + OG Audit · AI-Powered Action Plan
-    </p>
+<div style='background:linear-gradient(135deg,#1a237e,#283593,#0d47a1);
+     padding:1.8rem 2rem;border-radius:12px;margin-bottom:1.5rem'>
+  <h1 style='color:#fff;margin:0;font-size:1.9rem'>🛡️ Professional SEO Audit Tool <span style="font-size:1rem;opacity:.7">v3.0</span></h1>
+  <p style='color:#90caf9;margin:.4rem 0 0'>
+    Deep On-Page · Schema · Cannibalization · AI Action Plan &nbsp;|&nbsp;
+    Output matches SareeMela-style professional Excel report
+  </p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Sidebar Config ──────────────────────────────────────────────
+# ── Sidebar ────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("⚙️ Settings")
     sitemap_input = st.text_input("Sitemap URL", placeholder="https://example.com/sitemap_index.xml")
-    max_urls = st.number_input("Max Pages to Audit", 50, 2000, 500, 50)
-    max_workers = st.slider("Parallel Requests", 3, 20, 8)
+    max_urls      = st.number_input("Max Pages", 50, 2000, 500, 50)
+    workers       = st.slider("Parallel Requests", 3, 20, 8)
 
     st.divider()
-    st.subheader("🤖 AI Action Plan")
-    st.caption("Optional: Provide your Anthropic API key to generate an AI-powered priority action plan.")
-    api_key = st.text_input("Anthropic API Key", type="password", placeholder="sk-ant-...")
-    enable_ai = st.checkbox("Enable AI Action Plan", value=bool(api_key))
+    st.subheader("🤖 AI Enhancement")
+    st.caption("Optional — adds Claude AI to write smarter fixes & action plan.")
+    api_key    = st.text_input("Anthropic API Key", type="password", placeholder="sk-ant-…")
+    use_ai_fix = st.checkbox("AI-powered Recommended Fix (per page)", value=False,
+                              help="Slower — makes 1 API call per page with issues")
+    use_ai_plan = st.checkbox("AI-generated Priority Action Plan", value=bool(api_key))
 
     st.divider()
-    st.subheader("🔍 Filters")
-    filter_severity = st.multiselect(
-        "Filter by Cannibalization",
-        options=["🔴 CRITICAL", "🟠 HIGH", "🟡 MEDIUM", "🟢 OK"],
-        default=[]
-    )
-    filter_type = st.multiselect("Filter by Page Type", options=["Product", "Category", "Blog", "Static/Core", "Other"], default=[])
-    min_score = st.slider("Minimum SEO Score", 0, 100, 0)
+    run = st.button("🚀 Run Audit", type="primary", use_container_width=True)
 
-    run_audit = st.button("🚀 Run Audit", type="primary", use_container_width=True)
-
-# ── Main Logic ──────────────────────────────────────────────────
-if run_audit:
+# ── Main ───────────────────────────────────────────────────────
+if run:
     if not sitemap_input.strip():
         st.error("Please enter a sitemap URL.")
         st.stop()
 
-    # Fetch sitemap
-    with st.spinner("📡 Fetching sitemap..."):
-        all_links = get_filtered_sitemap_urls(sitemap_input.strip())
-
+    # Step 1 — Sitemap
+    with st.spinner("📡 Fetching sitemap…"):
+        all_links = get_sitemap_urls(sitemap_input.strip())
     if not all_links:
-        st.error("❌ No pages found in sitemap. Please verify the URL.")
+        st.error("❌ No pages found. Check your sitemap URL.")
         st.stop()
 
-    urls_to_audit = all_links[:max_urls]
-    st.success(f"✅ Found **{len(all_links)}** pages. Auditing **{len(urls_to_audit)}**.")
+    urls = all_links[:max_urls]
+    st.success(f"✅ Found **{len(all_links)}** pages. Auditing **{len(urls)}**.")
 
-    # Scrape
-    st.subheader("⏳ Auditing Pages...")
-    raw_results = scrape_all_urls(urls_to_audit, max_workers=max_workers)
-    df = pd.DataFrame(raw_results)
+    # Step 2 — Scrape
+    st.subheader("⏳ Scanning pages…")
+    pages = scrape_all(urls, workers)
 
-    # Cannibalization
-    with st.spinner("🔍 Detecting cannibalization..."):
-        df = detect_cannibalization(df)
+    # Step 3 — Cannibalization
+    with st.spinner("🔍 Detecting cannibalization…"):
+        cannibal_map = detect_cannibalization(pages)
 
-    # Score label
-    def score_label(s):
-        if s >= 80: return "🟢 Good"
-        if s >= 60: return "🟡 Needs Work"
-        if s >= 40: return "🟠 Poor"
-        return "🔴 Critical"
-    df["Score Label"] = df["SEO Score"].apply(score_label)
+    # Step 4 — Build audit rows
+    audit_rows = []
+    ai_fix_bar = None
+    pages_with_issues = [p for i,p in enumerate(pages)
+                         if cannibal_map.get(i) or p.get("status_code") != 200
+                         or not p.get("title") or p.get("title")=="Missing"]
 
-    # Apply sidebar filters
-    filtered_df = df.copy()
-    if filter_severity:
-        filtered_df = filtered_df[filtered_df["Cannibalization"].isin(filter_severity)]
-    if filter_type:
-        filtered_df = filtered_df[filtered_df["Type"].isin(filter_type)]
-    filtered_df = filtered_df[filtered_df["SEO Score"] >= min_score]
+    if use_ai_fix and api_key and pages_with_issues:
+        st.info(f"🤖 AI is writing fixes for {len(pages_with_issues)} pages with issues…")
 
-    # ── Summary Metrics ────────────────────────────────────────
+    for i, page in enumerate(pages):
+        cannibal_info = cannibal_map.get(i, {})
+        severity, issue, fix, priority = rule_based_analysis(page, cannibal_info)
+
+        if use_ai_fix and api_key and severity not in ["🟢 OK", "🔵 INFO"]:
+            fix = ai_fix(page, issue, fix, api_key)
+
+        audit_rows.append({
+            "#":                  i + 1,
+            "Page Type":          page.get("page_type",""),
+            "Severity":           severity,
+            "URL":                page.get("url",""),
+            "Page Title":         page.get("title",""),
+            "Primary Keyword":    page.get("primary_keyword",""),
+            "Issue / Problem":    issue,
+            "Recommended Fix":    fix,
+            "Priority":           priority,
+            # extra for action plan
+            "_status_code":       page.get("status_code",""),
+            "_cannibal_url":      cannibal_info.get("url",""),
+            "_cannibal_score":    cannibal_info.get("score",0),
+        })
+
+    # Step 5 — Action Plan
+    if use_ai_plan and api_key:
+        with st.spinner("🤖 Claude is writing your Priority Action Plan…"):
+            action_plan = generate_priority_plan_ai(audit_rows, api_key)
+        if not action_plan:
+            action_plan = build_rule_action_plan(audit_rows)
+    else:
+        action_plan = build_rule_action_plan(audit_rows)
+
+    # Step 6 — Summary metrics
     st.subheader("📊 Audit Overview")
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Total Pages", len(df))
-    m2.metric("Avg SEO Score", f"{df['SEO Score'].mean():.0f}/100")
-    m3.metric("🔴 Critical Issues", len(df[df["Cannibalization"] == "🔴 CRITICAL"]))
-    m4.metric("⚠️ Noindex", df["Robots Meta"].str.contains("noindex", na=False).sum())
-    m5.metric("No Schema", (df["Schema Types"] == "None").sum())
-    m6.metric("Missing H1", (df["H1"] == "Missing").sum())
+    sev_counts = pd.Series([r["Severity"] for r in audit_rows]).value_counts()
+    m1,m2,m3,m4,m5 = st.columns(5)
+    m1.metric("Total Pages",     len(audit_rows))
+    m2.metric("🔴 Critical",     sev_counts.get("🔴 CRITICAL",0))
+    m3.metric("🟠 High",         sev_counts.get("🟠 HIGH",0))
+    m4.metric("🟡 Medium",       sev_counts.get("🟡 MEDIUM",0))
+    m5.metric("🟢 OK",           sev_counts.get("🟢 OK",0))
 
-    # ── Charts ────────────────────────────────────────────────
-    render_charts(df)
+    # Step 7 — Preview tables
+    df_audit  = pd.DataFrame(audit_rows)
+    df_plan   = pd.DataFrame(action_plan)
+    display_cols = ["#","Page Type","Severity","URL","Page Title",
+                    "Primary Keyword","Issue / Problem","Recommended Fix","Priority"]
 
-    # ── Tabbed Data ───────────────────────────────────────────
-    st.subheader("📋 Detailed Results")
-    tab1, tab2, tab3, tab4 = st.tabs(["Full Audit", "⚠️ Issues Only", "🔁 Cannibalization", "🧠 Schema & OG"])
-
-    # Column sets
-    core_cols = ["Type", "Score Label", "SEO Score", "URL", "Status Code", "Title",
-                 "Title Length", "Meta Description", "Meta Desc Length",
-                 "H1", "H1 Count", "H2 Count", "Word Count",
-                 "Canonical", "Robots Meta", "Response Time (ms)", "Issues"]
-
-    schema_og_cols = ["URL", "Type", "Schema Types", "OG Title", "OG Description",
-                      "OG Image", "Total Images", "Images Missing Alt",
-                      "Internal Links", "External Links"]
-
-    cannibal_cols = ["URL", "Title", "Cannibalization", "Cannibal Score",
-                     "Cannibal URL", "Cannibal Action"]
-
+    tab1, tab2, tab3 = st.tabs(["📋 Full Audit", "🚨 Issues Only", "📌 Action Plan"])
     with tab1:
-        show_df = filtered_df[[c for c in core_cols if c in filtered_df.columns]]
-        st.dataframe(show_df, use_container_width=True, height=500)
-
+        st.dataframe(df_audit[display_cols], use_container_width=True, height=500)
     with tab2:
-        issues_df = filtered_df[filtered_df["Issues"] != "✅ None"]
-        st.info(f"{len(issues_df)} pages have at least one issue.")
-        st.dataframe(issues_df[[c for c in core_cols if c in issues_df.columns]],
-                     use_container_width=True, height=500)
-
+        issues_only = df_audit[df_audit["Severity"] != "🟢 OK"]
+        st.info(f"{len(issues_only)} pages need attention.")
+        st.dataframe(issues_only[display_cols], use_container_width=True, height=500)
     with tab3:
-        cannibal_df = df[df["Cannibalization"] != "🟢 OK"]
-        st.info(f"{len(cannibal_df)} pages have title cannibalization.")
-        st.dataframe(cannibal_df[[c for c in cannibal_cols if c in cannibal_df.columns]],
-                     use_container_width=True, height=500)
+        if not df_plan.empty:
+            st.dataframe(df_plan, use_container_width=True, height=400)
+        else:
+            st.info("No action plan items generated.")
 
-    with tab4:
-        st.dataframe(filtered_df[[c for c in schema_og_cols if c in filtered_df.columns]],
-                     use_container_width=True, height=500)
+    # Step 8 — Export
+    st.subheader("📥 Download Report")
+    with st.spinner("Building Excel report…"):
+        excel_bytes = build_excel_report(audit_rows, action_plan, sitemap_input.strip())
 
-    # ── AI Action Plan ─────────────────────────────────────────
-    if enable_ai and api_key:
-        st.subheader("🤖 AI-Powered Action Plan")
-        with st.spinner("Claude is analyzing your audit data..."):
-            summary = build_issues_summary(df)
-            ai_plan = generate_ai_action_plan(summary, api_key)
-        st.markdown(ai_plan)
-    elif enable_ai and not api_key:
-        st.warning("🔑 Please enter your Anthropic API key in the sidebar to enable AI analysis.")
-
-    # ── Excel Export ───────────────────────────────────────────
-    st.subheader("📥 Export Report")
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Full Audit")
-        df[df["Issues"] != "✅ None"].to_excel(writer, index=False, sheet_name="On-Page Issues")
-        df[df["Cannibalization"] != "🟢 OK"].to_excel(writer, index=False, sheet_name="Cannibalization")
-        df[[c for c in schema_og_cols if c in df.columns]].to_excel(writer, index=False, sheet_name="Schema & OG")
-    output.seek(0)
-
+    site_slug = re.sub(r"https?://", "", sitemap_input).split("/")[0].replace(".", "_")
     st.download_button(
-        label="📥 Download Full Report (4 Sheets)",
-        data=output.getvalue(),
-        file_name="SEO_Audit_Pro_Report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        label     = "📥 Download Professional Excel Report",
+        data      = excel_bytes,
+        file_name = f"SEO_Audit_{site_slug}.xlsx",
+        mime      = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 # ── Footer ─────────────────────────────────────────────────────
 st.markdown("---")
-st.caption("© M Zahidul Islam | SEO & Search Visibility Specialist | v2.0")
+st.caption("© M Zahidul Islam | SEO & Search Visibility Specialist | v3.0")
